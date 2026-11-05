@@ -1,0 +1,27 @@
+# Allow-list: this folder also holds local research material that must not be
+# published (extracted/decompressed game packages, decompiled game scripts,
+# crash dumps, third-party tool binaries). Only the files below are tracked.
+/*
+!/.gitignore
+!/.gitattributes
+!/LICENSE
+!/README.md
+!/TIMING_AUDIT.md
+!/KIDFrameRateFix.ini
+!/build.cmd
+!/src/
+!/tools/
+!/audit/
+
+# Audit notes only; everything else in audit/ is derived from game data.
+/audit/*
+!/audit/*.md
+
+# Own tool sources only.
+/tools/*
+!/tools/*.cpp
+!/tools/*.cs
+!/tools/*.csproj
+!/tools/*.ps1
+!/tools/*.py
+!/tools/README.md

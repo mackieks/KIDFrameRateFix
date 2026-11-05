@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net7.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>DumpKidFunctionBytes</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="DumpKidFunctionBytes.cs" />
+    <Reference Include="Eliot.UELib">
+      <HintPath>uelib-1.13.3/lib/netstandard2.0/Eliot.UELib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>
