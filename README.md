@@ -30,6 +30,7 @@ Edit `KIDFrameRateFix.ini`. The useful settings:
 | `FullscreenFadeFix` | `1` | Sizes the black fade-to-black overlay to your resolution instead of a fixed 1920x1080. |
 | `FOVMode` | `hor+` | `hor+` shows more at the sides on screens wider than 16:9. `vert-` is the game's own behaviour, which crops the top and bottom instead. No difference at 16:9. |
 | `FOV` | `60` | Gameplay field of view in degrees, measured horizontally at 16:9. 60 is stock. Aiming, lock-on and battle zooms scale along with it; cutscene camera shots don't. |
+| `Supersampling` | `1` | Renders the 3D scene this many times larger on each axis and scales it down to your resolution (1–4, `1` is off). `2` gives the cleanest result for its cost. The HUD and menus stay at native resolution. This is heavy on the GPU. |
 | `SmoothUIExperimental` | `1` | Runs the HUD scripts every frame, so their fades and the title screen animations follow your frame rate. `0` runs them at 30 Hz. |
 | `Enabled` | `1` | `0` turns the whole mod off without removing it. |
 
@@ -61,6 +62,7 @@ Delete `dinput8.dll` and `KIDFrameRateFix.ini`.
 - **Crash after boss fights.** The mod applies PCGamingWiki's audio-device workaround (more audio channels, a resident audio pool, and streaming decompression for longer sounds) to the game's audio device at startup, instead of you editing `KidEngine.ini`. It never lowers values you've already raised.
 - **Resolution.** The game starts at 1280x720 and its options menu stops at 1920x1080. The mod starts it at your desktop resolution instead, with no `KidEngine.ini` edit.
 - **Ultrawide and FOV.** The game is Vert-, so ultrawide screens lose picture at the top and bottom. The mod makes it Hor+ and adds an FOV setting. Don't combine this with another widescreen FOV fix, or the two will stack.
+- **Supersampling.** The game has no usable anti-aliasing, and its engine refuses `ScreenPercentage` above 100. The mod lifts that limit so the 3D scene can render at up to 4x your resolution per axis, with the HUD left sharp at native resolution. No driver downsampling setup needed.
 - **Fade to black.** The cinematic fade covers the whole screen at any resolution, not just 1080p.
 - **Alice mission heart platform.** After you talk to Scarlett, stepping back onto the heart lift used to shove Mondo onto the upper ledge, and the lift went down without him. This is an engine-level bug: the game freezes the player for the ride, but a walk animation that's still playing keeps moving him through root motion. The fix holds that leftover animation movement whenever a cutscene trigger has frozen the player, so it should catch any other spot in the game with the same problem.
 
@@ -90,6 +92,11 @@ That produces `build\dinput8.dll`. Run `build.cmd install` to also copy it into 
 - The package decompression and dump tools used for the audit.
 
 The game files they read aren't included.
+
+## Changes
+
+- **1.1:** Adds the `Supersampling` setting. To update from 1.0, replace `dinput8.dll`. Your existing `KIDFrameRateFix.ini` still works; if it has no `Supersampling` line, supersampling stays off.
+- **1.0:** First release.
 
 ## License
 

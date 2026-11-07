@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <intrin.h>
 
 #include <cstdarg>
 #include <climits>
@@ -20,7 +21,7 @@ void CrashDumpInstall(BYTE* textBegin, SIZE_T textSize, const wchar_t* dumpPath)
 void ApplyStartupResolution(int mode, int width, int height);
 
 #ifndef KIDFRAMERATEFIX_VERSION
-#define KIDFRAMERATEFIX_VERSION "1.0.0"
+#define KIDFRAMERATEFIX_VERSION "1.1.0"
 #endif
 
 namespace {
@@ -103,6 +104,7 @@ bool g_fullscreenFadeFix = true;
 bool g_fovHorPlus = true;   // [Display] FOVMode=hor+ (false = vert-, the retail behaviour)
 float g_fov = 60.0f;        // [Display] FOV, gameplay horizontal FOV at 16:9
 float g_fovScale = 1.0f;    // tan(FOV/2) / tan(30 degrees)
+float g_supersampling = 1.0f; // [Display] Supersampling, render scale per axis (1 = off)
 int g_resolutionMode = 1;  // 0 = game setting, 1 = desktop, 2 = configured size
 int g_resolutionWidth = 0;
 int g_resolutionHeight = 0;
@@ -491,6 +493,13 @@ void LoadConfiguration() {
         g_fov = 60.0f;
     }
     g_fovScale = tanf(g_fov * 0.5f * 3.14159265f / 180.0f) / tanf(30.0f * 3.14159265f / 180.0f);
+    GetPrivateProfileStringW(L"Display", L"Supersampling", L"1", fovText,
+                             static_cast<DWORD>(ArrayCount(fovText)), g_iniPath);
+    g_supersampling = static_cast<float>(_wtof(fovText));
+    if (!(g_supersampling >= 1.0f && g_supersampling <= 4.0f)) {
+        Log(L"Supersampling=%s is outside 1-4; supersampling is off.", fovText);
+        g_supersampling = 1.0f;
+    }
     int frameRateLimit = GetPrivateProfileIntW(
         L"FrameRate", L"FrameRateLimit", 0, g_iniPath);
     if (frameRateLimit != 0 && (frameRateLimit < 30 || frameRateLimit > 1000)) {
@@ -584,6 +593,130 @@ constexpr PatternByte kProjectionFovPattern[] = {
 };
 constexpr SIZE_T kProjectionFovHookOffset = 30;      // movss [esp+24h],xmm0 (6 bytes)
 constexpr SIZE_T kProjectionFovConstraintOffset = 42; // disp32 of AspectRatioAxisConstraint
+
+// Screen-percentage plumbing in FSystemSettings and FSceneRenderTargets.
+// UE3 renders the scene into a ScreenPercentage-sized rectangle of the scene
+// buffers and scales it to the viewport in its final pass. Retail clamps the
+// percentage to 100, centres the reduced rectangle, and sizes the buffers to
+// the viewport, so values above 100 render nothing.
+//
+// FSystemSettings::NeedsUpscale:
+//   cmp [ecx+bUpscaleScreenPercentage],0; je; movss xmm0,[100.0];
+//   comiss xmm0,[ecx+ScreenPercentage]; jbe; cmp [ecx+...],0; jne; mov eax,1; ret
+constexpr PatternByte kNeedsUpscalePattern[] = {
+    {0x83, false}, {0xB9, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x74, false}, {0x20, false},
+    {0xF3, false}, {0x0F, false}, {0x10, false}, {0x05, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x0F, false}, {0x2F, false}, {0x81, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false},
+    {0x76, false}, {0x0F, false},
+    {0x83, false}, {0xB9, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x75, false}, {0x06, false},
+    {0xB8, false}, {0x01, false}, {0x00, false}, {0x00, false}, {0x00, false}, {0xC3, false},
+    {0x33, false}, {0xC0, false}, {0xC3, false},
+};
+constexpr SIZE_T kNeedsUpscaleHookLength = 7;
+
+// FSystemSettings::ScaleScreenCoords(INT& X, INT& Y, UINT& SizeX, UINT& SizeY),
+// called by ULocalPlayer::CalcSceneView:
+//   movss xmm0,[GSystemSettings.ScreenPercentage]; sub esp,0Ch; ucomiss xmm0,[100.0];
+//   lahf; test ah,44h; jnp; cmp [ecx+...],0; jne; mulss xmm0,[0.01]
+constexpr PatternByte kScaleScreenCoordsPattern[] = {
+    {0xF3, false}, {0x0F, false}, {0x10, false}, {0x05, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x83, false}, {0xEC, false}, {0x0C, false},
+    {0x0F, false}, {0x2E, false}, {0x05, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x9F, false}, {0xF6, false}, {0xC4, false}, {0x44, false},
+    {0x0F, false}, {0x8B, false}, {0xEA, false}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x83, false}, {0xB9, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x0F, false}, {0x85, false}, {0xDD, false}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0xF3, false}, {0x0F, false}, {0x59, false}, {0x05, false},
+};
+constexpr SIZE_T kScaleScreenCoordsHookLength = 8;
+
+// FSystemSettings::UnScaleScreenCoords(INT& X, INT& Y, UINT& SizeX, UINT& SizeY,
+//   FLOAT ScaledX, FLOAT ScaledY, FLOAT ScaledSizeX, FLOAT ScaledSizeY), used by
+// the renderer's final pass to map the scene rectangle back to the viewport.
+constexpr PatternByte kUnScaleScreenCoordsPattern[] = {
+    {0x83, false}, {0xB9, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x0F, false}, {0x84, false}, {0x03, false}, {0x01, false}, {0x00, false}, {0x00, false},
+    {0xF3, false}, {0x0F, false}, {0x10, false}, {0x05, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x0F, false}, {0x2F, false}, {0x81, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false},
+    {0x0F, false}, {0x86, false}, {0xEE, false}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x83, false}, {0xB9, false}, {0, true}, {0, true}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x0F, false}, {0x85, false}, {0xE1, false}, {0x00, false}, {0x00, false}, {0x00, false},
+};
+constexpr SIZE_T kUnScaleScreenCoordsHookLength = 7;
+
+// FSceneRenderTargets::Allocate(UINT MinSizeX, UINT MinSizeY): grows the scene
+// buffers to at least the requested size (rounded up to a multiple of 8).
+constexpr PatternByte kSceneTargetsAllocatePattern[] = {
+    {0x6A, false}, {0xFF, false},
+    {0x68, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x64, false}, {0xA1, false}, {0x00, false}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x50, false}, {0x53, false}, {0x55, false}, {0x56, false}, {0x57, false},
+    {0xA1, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x33, false}, {0xC4, false}, {0x50, false},
+    {0x8D, false}, {0x44, false}, {0x24, false}, {0x14, false},
+    {0x64, false}, {0xA3, false}, {0x00, false}, {0x00, false}, {0x00, false}, {0x00, false},
+    {0x8B, false}, {0xF1, false},
+    {0xE8, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x85, false}, {0xC0, false}, {0x75, false}, {0x50, false},
+};
+constexpr SIZE_T kSceneTargetsAllocateHookLength = 7;
+
+// FSceneRenderer's constructor sets each view's scene-buffer region (the
+// rectangle the post-process chain and the final pass read) to
+//   RenderTargetSizeX = Min(appTrunc(View.SizeX), RenderTarget->GetSizeX())
+// and the same for Y, which cuts a supersampled view back to the window size:
+//   cvttss2si edi,xmm0; call GetSizeX/Y; cmp edi,eax; jg +2; mov eax,edi; ...
+// The two jg are replaced with nops so the region is the full view.
+constexpr PatternByte kViewTargetClampXPattern[] = {
+    {0xF3, false}, {0x0F, false}, {0x2C, false}, {0xF8, false}, {0xFF, false}, {0xD0, false},
+    {0x3B, false}, {0xF8, false}, {0x7F, false}, {0x02, false}, {0x8B, false}, {0xC7, false},
+    {0xF3, false}, {0x0F, false}, {0x10, false}, {0x46, false}, {0x44, false},
+    {0x89, false}, {0x46, false}, {0x50, false},
+};
+constexpr PatternByte kViewTargetClampYPattern[] = {
+    {0xF3, false}, {0x0F, false}, {0x2C, false}, {0xF8, false}, {0xFF, false}, {0xD0, false},
+    {0x3B, false}, {0xF8, false}, {0x7F, false}, {0x02, false}, {0x8B, false}, {0xC7, false},
+    {0x89, false}, {0x46, false}, {0x54, false}, {0xDB, false}, {0x05, false},
+};
+constexpr SIZE_T kViewTargetClampJumpOffset = 8;
+
+// The final pass's UnScaleScreenCoords call (FSceneRenderer finish, which
+// copies the scene region to the viewport):
+//   mov ecx,offset GSystemSettings; mov [esp+34h],ebx; call UnScaleScreenCoords;
+//   cmp [ebp+4FCh],ebx; je
+// Its other callers clear the scene buffers around the views and must cover the
+// whole scaled region, so only this call maps back to viewport size.
+constexpr PatternByte kFinalPassUnScaleCallPattern[] = {
+    {0xB9, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x89, false}, {0x5C, false}, {0x24, false}, {0x34, false},
+    {0xE8, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x39, false}, {0x9D, false}, {0xFC, false}, {0x04, false}, {0x00, false}, {0x00, false},
+    {0x74, false}, {0x31, false},
+};
+constexpr SIZE_T kFinalPassUnScaleCallOffset = 9;
+
+// The scene-colour clear at the start of a frame binds the scene buffers and
+// sets the viewport to the view family's render target (the window):
+//   mov ecx,offset GSceneRenderTargets; call BeginRenderingSceneColor;
+//   mov ecx,[ebx+10h]; mov edx,[ecx]; mov eax,[edx+8]; call eax  ; GetSizeX
+//   mov ecx,[ebx+10h]; mov edx,[ecx]; mov esi,eax; mov eax,[edx+0Ch]; call eax  ; GetSizeY
+//   mov ecx,[GDynamicRHI] ...   (edi = SizeY; RHISetViewport(0,0,0,esi,edi,1))
+// Supersampled, that clears only the top-left part of the scene buffers. The
+// two size queries are replaced with a stub that scales them.
+constexpr PatternByte kSceneColorViewportPattern[] = {
+    {0xB9, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0xE8, false}, {0, true}, {0, true}, {0, true}, {0, true},
+    {0x8B, false}, {0x4B, false}, {0x10, false}, {0x8B, false}, {0x11, false},
+    {0x8B, false}, {0x42, false}, {0x08, false}, {0xFF, false}, {0xD0, false},
+    {0x8B, false}, {0x4B, false}, {0x10, false}, {0x8B, false}, {0x11, false},
+    {0x8B, false}, {0xF0, false}, {0x8B, false}, {0x42, false}, {0x0C, false},
+    {0xFF, false}, {0xD0, false},
+    {0x8B, false}, {0x0D, false},
+};
+constexpr SIZE_T kSceneColorViewportSiteOffset = 10;
+constexpr SIZE_T kSceneColorViewportSiteLength = 22;
 
 // FGFxEngine::Tick starts 0x12C bytes before the unique Movie::Advance sequence.
 // The retail function accepts DeltaTime but ignores it for game-timed movies.
@@ -3244,6 +3377,133 @@ __declspec(naked) void ProjectionFovStub() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Supersampling.
+//
+// With Supersampling=N the scene is rendered at N times the viewport size per
+// axis and scaled down by the engine's own screen-percentage pass, so the HUD,
+// menus and Scaleform movies stay at native resolution. The rectangle is
+// scaled from the buffer origin rather than centred, and the buffers are
+// allocated at the scaled size. ScreenPercentage in KidEngine.ini is ignored
+// while this is on.
+// ---------------------------------------------------------------------------
+
+using NeedsUpscaleFunction = BOOL(__thiscall*)(void* settings);
+using ScaleScreenCoordsFunction = void(__thiscall*)(void* settings, int* x, int* y,
+                                                    unsigned* sizeX, unsigned* sizeY);
+using UnScaleScreenCoordsFunction = void(__thiscall*)(void* settings, int* x, int* y,
+                                                      unsigned* sizeX, unsigned* sizeY,
+                                                      float scaledX, float scaledY,
+                                                      float scaledSizeX, float scaledSizeY);
+using SceneTargetsAllocateFunction = void(__thiscall*)(void* targets, unsigned minSizeX,
+                                                       unsigned minSizeY);
+NeedsUpscaleFunction g_originalNeedsUpscale = nullptr;
+ScaleScreenCoordsFunction g_originalScaleScreenCoords = nullptr;
+UnScaleScreenCoordsFunction g_originalUnScaleScreenCoords = nullptr;
+SceneTargetsAllocateFunction g_originalSceneTargetsAllocate = nullptr;
+const BYTE* g_finalPassUnScaleReturn = nullptr;
+// Largest scene buffer edge the mod will request (the D3D9 texture limit on
+// current GPUs is 16384).
+constexpr unsigned kMaxSceneBufferEdge = 16384;
+
+unsigned SupersampledSize(unsigned size) {
+    const double scaled = static_cast<double>(size) * g_supersampling;
+    return scaled >= kMaxSceneBufferEdge ? kMaxSceneBufferEdge : static_cast<unsigned>(scaled);
+}
+
+BOOL __fastcall NeedsUpscale(void* settings, void*) {
+    return g_supersampling > 1.0f ? TRUE : g_originalNeedsUpscale(settings);
+}
+
+void __fastcall ScaleScreenCoords(void* settings, void*, int* x, int* y,
+                                  unsigned* sizeX, unsigned* sizeY) {
+    if (g_supersampling <= 1.0f) {
+        g_originalScaleScreenCoords(settings, x, y, sizeX, sizeY);
+        return;
+    }
+
+    *x = static_cast<int>(*x * g_supersampling);
+    *y = static_cast<int>(*y * g_supersampling);
+    *sizeX = SupersampledSize(*sizeX);
+    *sizeY = SupersampledSize(*sizeY);
+}
+
+void __fastcall UnScaleScreenCoords(void* settings, void*, int* x, int* y,
+                                    unsigned* sizeX, unsigned* sizeY,
+                                    float scaledX, float scaledY,
+                                    float scaledSizeX, float scaledSizeY) {
+    if (g_supersampling <= 1.0f) {
+        g_originalUnScaleScreenCoords(settings, x, y, sizeX, sizeY,
+                                      scaledX, scaledY, scaledSizeX, scaledSizeY);
+        return;
+    }
+    const float scale = _ReturnAddress() == g_finalPassUnScaleReturn ? g_supersampling : 1.0f;
+    *x = static_cast<int>(scaledX / scale);
+    *y = static_cast<int>(scaledY / scale);
+    *sizeX = static_cast<unsigned>(scaledSizeX / scale + 0.5f);
+    *sizeY = static_cast<unsigned>(scaledSizeY / scale + 0.5f);
+}
+
+void __fastcall SceneTargetsAllocate(void* targets, void*, unsigned minSizeX, unsigned minSizeY) {
+    if (g_supersampling > 1.0f) {
+        minSizeX = SupersampledSize(minSizeX);
+        minSizeY = SupersampledSize(minSizeY);
+    }
+    g_originalSceneTargetsAllocate(targets, minSizeX, minSizeY);
+}
+
+// Replaces the scene-colour clear's two size queries (see
+// kSceneColorViewportPattern): esi = SizeX * N, eax = SizeY * N.
+BYTE* g_sceneColorViewportReturn = nullptr;
+__declspec(naked) void SceneColorViewportStub() {
+    __asm {
+        mov ecx, [ebx+10h]
+        mov edx, [ecx]
+        call dword ptr [edx+8]
+        cvtsi2ss xmm0, eax
+        mulss xmm0, dword ptr [g_supersampling]
+        cvttss2si esi, xmm0
+        mov ecx, [ebx+10h]
+        mov edx, [ecx]
+        call dword ptr [edx+0Ch]
+        cvtsi2ss xmm0, eax
+        mulss xmm0, dword ptr [g_supersampling]
+        cvttss2si eax, xmm0
+        jmp dword ptr [g_sceneColorViewportReturn]
+    }
+}
+
+bool InstallSceneColorViewportStub(BYTE* site) {
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(site, kSceneColorViewportSiteLength, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        return false;
+    }
+    g_sceneColorViewportReturn = site + kSceneColorViewportSiteLength;
+    WriteRelativeJump(site, reinterpret_cast<const void*>(&SceneColorViewportStub));
+    for (SIZE_T index = 5; index < kSceneColorViewportSiteLength; ++index) {
+        site[index] = 0x90;
+    }
+    FlushInstructionCache(GetCurrentProcess(), site, kSceneColorViewportSiteLength);
+    DWORD ignored = 0;
+    VirtualProtect(site, kSceneColorViewportSiteLength, oldProtect, &ignored);
+    return true;
+}
+
+// Replaces a two-byte conditional jump with nops.
+bool RemoveShortJump(BYTE* jump, const wchar_t* label) {
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(jump, 2, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        Log(L"VirtualProtect for %s failed (error %lu).", label, GetLastError());
+        return false;
+    }
+    jump[0] = 0x90;
+    jump[1] = 0x90;
+    FlushInstructionCache(GetCurrentProcess(), jump, 2);
+    DWORD ignored = 0;
+    VirtualProtect(jump, 2, oldProtect, &ignored);
+    return true;
+}
+
 bool InstallProjectionFovHook(BYTE* site) {
     DWORD oldProtect = 0;
     if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &oldProtect)) {
@@ -4449,6 +4709,60 @@ void Initialize() {
         } else {
             g_fullscreenFadeFix = false;
             Log(L"Cinematic fade fix was not installed.");
+        }
+    }
+
+    if (g_supersampling > 1.0f) {
+        BYTE* needsUpscale = FindUniquePattern(textBegin, textSize, kNeedsUpscalePattern,
+            ArrayCount(kNeedsUpscalePattern), L"FSystemSettings::NeedsUpscale");
+        BYTE* scale = FindUniquePattern(textBegin, textSize, kScaleScreenCoordsPattern,
+            ArrayCount(kScaleScreenCoordsPattern), L"FSystemSettings::ScaleScreenCoords");
+        BYTE* unscale = FindUniquePattern(textBegin, textSize, kUnScaleScreenCoordsPattern,
+            ArrayCount(kUnScaleScreenCoordsPattern), L"FSystemSettings::UnScaleScreenCoords");
+        BYTE* allocate = FindUniquePattern(textBegin, textSize, kSceneTargetsAllocatePattern,
+            ArrayCount(kSceneTargetsAllocatePattern), L"FSceneRenderTargets::Allocate");
+        BYTE* clampX = FindUniquePattern(textBegin, textSize, kViewTargetClampXPattern,
+            ArrayCount(kViewTargetClampXPattern), L"view region clamp (X)");
+        BYTE* clampY = FindUniquePattern(textBegin, textSize, kViewTargetClampYPattern,
+            ArrayCount(kViewTargetClampYPattern), L"view region clamp (Y)");
+        BYTE* finalPassCall = FindUniquePattern(textBegin, textSize, kFinalPassUnScaleCallPattern,
+            ArrayCount(kFinalPassUnScaleCallPattern), L"final pass UnScaleScreenCoords call");
+        if (finalPassCall != nullptr && unscale != nullptr) {
+            BYTE* call = finalPassCall + kFinalPassUnScaleCallOffset;
+            if (call + 5 + *reinterpret_cast<const INT32*>(call + 1) == unscale) {
+                g_finalPassUnScaleReturn = call + 5;
+            }
+        }
+        BYTE* sceneColorViewport = FindUniquePattern(textBegin, textSize, kSceneColorViewportPattern,
+            ArrayCount(kSceneColorViewportPattern), L"scene colour viewport");
+        // The two clamps are consecutive statements of one function.
+        if (clampX != nullptr && clampY != nullptr && (clampY <= clampX || clampY - clampX > 0x40)) {
+            clampY = nullptr;
+        }
+
+        // All or none: a partial set would render outside the buffers.
+        if (needsUpscale != nullptr && scale != nullptr && unscale != nullptr && allocate != nullptr &&
+            clampX != nullptr && clampY != nullptr && g_finalPassUnScaleReturn != nullptr &&
+            sceneColorViewport != nullptr &&
+            InstallHook(allocate, kSceneTargetsAllocateHookLength,
+                reinterpret_cast<const void*>(&SceneTargetsAllocate),
+                &g_originalSceneTargetsAllocate, L"FSceneRenderTargets::Allocate") &&
+            InstallHook(unscale, kUnScaleScreenCoordsHookLength,
+                reinterpret_cast<const void*>(&UnScaleScreenCoords),
+                &g_originalUnScaleScreenCoords, L"FSystemSettings::UnScaleScreenCoords") &&
+            InstallHook(needsUpscale, kNeedsUpscaleHookLength,
+                reinterpret_cast<const void*>(&NeedsUpscale),
+                &g_originalNeedsUpscale, L"FSystemSettings::NeedsUpscale") &&
+            InstallHook(scale, kScaleScreenCoordsHookLength,
+                reinterpret_cast<const void*>(&ScaleScreenCoords),
+                &g_originalScaleScreenCoords, L"FSystemSettings::ScaleScreenCoords")) {
+            InstallSceneColorViewportStub(sceneColorViewport + kSceneColorViewportSiteOffset);
+            RemoveShortJump(clampX + kViewTargetClampJumpOffset, L"view region clamp (X)");
+            RemoveShortJump(clampY + kViewTargetClampJumpOffset, L"view region clamp (Y)");
+            Log(L"Supersampling hooks installed: the scene renders at %.2fx per axis.", g_supersampling);
+        } else {
+            g_supersampling = 1.0f;
+            Log(L"Supersampling hooks were not installed; rendering at native resolution.");
         }
     }
 
