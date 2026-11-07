@@ -3422,10 +3422,20 @@ void __fastcall ScaleScreenCoords(void* settings, void*, int* x, int* y,
         return;
     }
 
+    const unsigned viewX = *sizeX;
+    const unsigned viewY = *sizeY;
     *x = static_cast<int>(*x * g_supersampling);
     *y = static_cast<int>(*y * g_supersampling);
     *sizeX = SupersampledSize(*sizeX);
     *sizeY = SupersampledSize(*sizeY);
+    // Report the render size once per view size (startup and window resizes).
+    static unsigned loggedX = 0;
+    static unsigned loggedY = 0;
+    if (viewX != loggedX || viewY != loggedY) {
+        loggedX = viewX;
+        loggedY = viewY;
+        Log(L"Supersampling: the %ux%u view renders at %ux%u.", viewX, viewY, *sizeX, *sizeY);
+    }
 }
 
 void __fastcall UnScaleScreenCoords(void* settings, void*, int* x, int* y,
@@ -4759,7 +4769,8 @@ void Initialize() {
             InstallSceneColorViewportStub(sceneColorViewport + kSceneColorViewportSiteOffset);
             RemoveShortJump(clampX + kViewTargetClampJumpOffset, L"view region clamp (X)");
             RemoveShortJump(clampY + kViewTargetClampJumpOffset, L"view region clamp (Y)");
-            Log(L"Supersampling hooks installed: the scene renders at %.2fx per axis.", g_supersampling);
+            Log(L"Supersampling hooks installed: %gx%g samples per pixel (%gx SSAA).",
+                g_supersampling, g_supersampling, g_supersampling * g_supersampling);
         } else {
             g_supersampling = 1.0f;
             Log(L"Supersampling hooks were not installed; rendering at native resolution.");
