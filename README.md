@@ -1,6 +1,6 @@
 # KIDFrameRateFix
 
-Dynamic FPS unlock mod for Killer Is Dead: Nightmare Edition (PC).
+Dynamic FPS unlock mod for Killer Is Dead: Nightmare Edition (PC). Works on Steam Deck.
 
 ## Overview
 
