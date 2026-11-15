@@ -97,6 +97,7 @@ The game files they read aren't included.
 
 ## Changes
 
+- **1.1.1:** Fixes Scarlett's challenge countdown, lingering QTE prompts and HUD bars, and the mash QTE gauge at high frame rates. To update from 1.1, replace `dinput8.dll`. Your existing `KIDFrameRateFix.ini` still works; the new `QTEMashGaugeFix` setting is on by default.
 - **1.1:** Adds the `Supersampling` setting. To update from 1.0, replace `dinput8.dll`. Your existing `KIDFrameRateFix.ini` still works; if it has no `Supersampling` line, supersampling stays off.
 - **1.0:** First release.
 

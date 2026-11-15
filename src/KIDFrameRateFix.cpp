@@ -22,7 +22,7 @@ void ApplyStartupResolution(int mode, int width, int height);
 void ApplyStartMap(const wchar_t* map);
 
 #ifndef KIDFRAMERATEFIX_VERSION
-#define KIDFRAMERATEFIX_VERSION "1.1.0"
+#define KIDFRAMERATEFIX_VERSION "1.1.1"
 #endif
 
 namespace {
