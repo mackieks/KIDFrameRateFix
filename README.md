@@ -58,6 +58,8 @@ Delete `dinput8.dll` and `KIDFrameRateFix.ini`.
 - **Bosses.** Fixes Giant Head's stun and beam phases, Thomas's motion, Sebastian's absorb phase, and Sebastian staying airborne after being stunned.
 - **Repeated sounds.** The zero-blood drill cancel, player-hit feedback and Gigolo lever QTE sounds no longer fire every frame.
 - **Pickups.** Collectibles no longer fly to you 14x too fast, and stuck enemy drops no longer snap to you instantly.
+- **Mission timers and QTE prompts.** Scarlett's challenge countdown runs in real time again (it ran at 30/FPS speed, so a third as fast at 90 FPS), and QTE button prompts and HUD bars no longer linger.
+- **Mash QTE gauge.** The fill bar for button-mash QTEs, such as David's sword lock, fills the same at any frame rate. Above 30 FPS it used to drain faster than you could fill it, and at 90 FPS it stayed empty.
 - **Giant Head's thrown objects.** They no longer spin 14x too fast.
 - **Crash after boss fights.** The mod applies PCGamingWiki's audio-device workaround (more audio channels, a resident audio pool, and streaming decompression for longer sounds) to the game's audio device at startup, instead of you editing `KidEngine.ini`. It never lowers values you've already raised.
 - **Resolution.** The game starts at 1280x720 and its options menu stops at 1920x1080. The mod starts it at your desktop resolution instead, with no `KidEngine.ini` edit.

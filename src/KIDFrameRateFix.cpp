@@ -19,6 +19,7 @@ void TimingProbeFinish(double seconds, DWORD gameThread);
 void KidLog(const wchar_t* format, ...);
 void CrashDumpInstall(BYTE* textBegin, SIZE_T textSize, const wchar_t* dumpPath);
 void ApplyStartupResolution(int mode, int width, int height);
+void ApplyStartMap(const wchar_t* map);
 
 #ifndef KIDFRAMERATEFIX_VERSION
 #define KIDFRAMERATEFIX_VERSION "1.1.0"
@@ -92,6 +93,7 @@ bool g_droppedPickupFix = true;
 bool g_giantHeadThrowSpinFix = true;
 bool g_cinematicRootMotionFix = true;
 bool g_audioDeviceFix = true;
+bool g_qteMashGaugeFix = true;
 bool g_unlockFrameRate = true;
 int g_frameRateLimit = 0;
 int g_uiTickFps = kDefaultUiTickFps;
@@ -105,6 +107,7 @@ bool g_fovHorPlus = true;   // [Display] FOVMode=hor+ (false = vert-, the retail
 float g_fov = 60.0f;        // [Display] FOV, gameplay horizontal FOV at 16:9
 float g_fovScale = 1.0f;    // tan(FOV/2) / tan(30 degrees)
 float g_supersampling = 1.0f; // [Display] Supersampling, render scale per axis (1 = off)
+wchar_t g_startMap[128] = {};  // [Diagnostics] StartMap (testing aid)
 int g_resolutionMode = 1;  // 0 = game setting, 1 = desktop, 2 = configured size
 int g_resolutionWidth = 0;
 int g_resolutionHeight = 0;
@@ -229,13 +232,13 @@ struct SoundRetriggerTarget {
 
 SoundRetriggerTarget g_soundRetriggerTargets[kSoundRetriggerTargetCount] = {
     {"OnFinishDrillCancel", L"OnFinishDrillCancel", "KidWeapon_Drill",
-     L"KidWeapon_Drill", -1, -1, nullptr, nullptr, 0},
+     L"KidWeapon_Drill", -1, -1, nullptr, nullptr},
     {"PlayDamageSoundCueAndParticleSystem", L"PlayDamageSoundCueAndParticleSystem",
-     "KidPlayerController", L"KidPlayerController", -1, -1, nullptr, nullptr, 0},
+     "KidPlayerController", L"KidPlayerController", -1, -1, nullptr, nullptr},
     {"PlayLeverSoundSE", L"PlayLeverSoundSE", "KidPlayerSpecialMove_Jigoro",
-     L"KidPlayerSpecialMove_Jigoro", -1, -1, nullptr, nullptr, 0},
+     L"KidPlayerSpecialMove_Jigoro", -1, -1, nullptr, nullptr},
     {"PlayLeverSoundSE", L"PlayLeverSoundSE", "KidSeqAct_ScarletCutScene",
-     L"KidSeqAct_ScarletCutScene", -1, -1, nullptr, nullptr, 0},
+     L"KidSeqAct_ScarletCutScene", -1, -1, nullptr, nullptr},
 };
 
 struct SoundRetriggerState {
@@ -258,6 +261,9 @@ SoundRetriggerProbe g_soundRetriggerProbes[kSoundRetriggerProbeSlots] = {};
 // In smooth-UI mode the manager runs every rendered frame. These helpers
 // contain discrete retail-frame counters and therefore remain on the shared
 // 30 Hz logical generation while DeltaTime-safe UI helpers run at render rate.
+// Several also advance timers by their DeltaTime parameter, so each executed
+// call receives the time accumulated since the previous executed call (see
+// ApplyUiGateDelta).
 struct UiFrameGateTarget {
     const char* functionName;
     const wchar_t* functionNameWide;
@@ -267,26 +273,31 @@ struct UiFrameGateTarget {
     volatile LONG outerNameIndex;
     PVOID volatile function;
     PVOID volatile returnCode;
+    // 1 = the function's first parameter is "float DeltaTime" at offset 0,
+    // -1 = it is not (delta left untouched), 0 = not checked yet.
+    volatile LONG deltaParameterState;
 };
 
 UiFrameGateTarget g_uiFrameGateTargets[kUiFrameGateTargetCount] = {
-    {"PauseEventTick", L"PauseEventTick", "KidGFxMgr", L"KidGFxMgr", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_ABVision", L"KidGFx_ABVision", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_BurstVision", L"KidGFx_BurstVision", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_ButtonGuide", L"KidGFx_ButtonGuide", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_ClearStats", L"KidGFx_ClearStats", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_Leaderboard", L"KidGFx_Leaderboard", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_MondoGauge", L"KidGFx_MondoGauge", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_MondoStatus", L"KidGFx_MondoStatus", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_MovieStatus", L"KidGFx_MovieStatus", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_WeaponChange", L"KidGFx_WeaponChange", -1, -1, nullptr, nullptr},
-    {"Tick", L"Tick", "KidGFx_MovieResultContent", L"KidGFx_MovieResultContent", -1, -1, nullptr, nullptr},
+    {"PauseEventTick", L"PauseEventTick", "KidGFxMgr", L"KidGFxMgr", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_ABVision", L"KidGFx_ABVision", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_BurstVision", L"KidGFx_BurstVision", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_ButtonGuide", L"KidGFx_ButtonGuide", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_ClearStats", L"KidGFx_ClearStats", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_Leaderboard", L"KidGFx_Leaderboard", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_MondoGauge", L"KidGFx_MondoGauge", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_MondoStatus", L"KidGFx_MondoStatus", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_MovieStatus", L"KidGFx_MovieStatus", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_WeaponChange", L"KidGFx_WeaponChange", -1, -1, nullptr, nullptr, 0},
+    {"Tick", L"Tick", "KidGFx_MovieResultContent", L"KidGFx_MovieResultContent", -1, -1, nullptr, nullptr, 0},
 };
 
 struct UiFrameGateState {
     void* object;
     int targetIndex;
     LONG lastGeneration;
+    double accumulatedDelta;  // DeltaTime of calls since the last executed one
+    ULONGLONG lastCallMs;
 };
 
 UiFrameGateState g_uiFrameGateStates[kUiFrameGateStateSlots] = {};
@@ -449,10 +460,14 @@ void LoadConfiguration() {
         L"Gameplay", L"CinematicRootMotionFix", 1, g_iniPath) != 0;
     g_audioDeviceFix = GetPrivateProfileIntW(
         L"Gameplay", L"AudioDeviceFix", 1, g_iniPath) != 0;
+    g_qteMashGaugeFix = GetPrivateProfileIntW(
+        L"Gameplay", L"QTEMashGaugeFix", 1, g_iniPath) != 0;
     g_unlockFrameRate = GetPrivateProfileIntW(
         L"FrameRate", L"UnlockFrameRate", 1, g_iniPath) != 0;
     g_crashDump = GetPrivateProfileIntW(
         L"Diagnostics", L"CrashDump", 0, g_iniPath) != 0;
+    GetPrivateProfileStringW(L"Diagnostics", L"StartMap", L"", g_startMap,
+                             static_cast<DWORD>(ArrayCount(g_startMap)), g_iniPath);
     g_timingProbe = GetPrivateProfileIntW(
         L"Diagnostics", L"TimingProbe", 0, g_iniPath) != 0;
     g_frameRateReport = GetPrivateProfileIntW(
@@ -2980,6 +2995,173 @@ bool ProcessFixedStepFunction(void* object, BYTE* stack) {
     return true;
 }
 
+// Smooth-UI gate timing. ShouldSuppressUiFrameGate runs one body per 30 Hz
+// generation, but each call carries only its own rendered-frame DeltaTime, so
+// timers in an executed body (the challenge-mission countdown in
+// KidGFx_MondoGauge.Tick, QTE prompt delays, gauge animations) would advance by
+// one frame's time per 30 Hz step. Runs from UObject::ProcessInternal, where the
+// arguments are in Locals: every call adds its DeltaTime, and the executed call
+// receives the total since the previous executed call.
+bool UiGateHasDeltaParameter(int targetIndex, void* function) {
+    // Extra [Diagnostics] SmoothUIGate patterns are bisection aids; their
+    // timing is left as it is.
+    if (targetIndex < 0 || targetIndex >= static_cast<int>(kUiFrameGateTargetCount)) {
+        return false;
+    }
+    UiFrameGateTarget& target = g_uiFrameGateTargets[targetIndex];
+    LONG state = target.deltaParameterState;
+    if (state == 0) {
+        static int deltaName = -1;
+        static volatile LONG floatPropertyName = -1;
+        if (deltaName < 0) {
+            deltaName = FindNameIndex("DeltaTime");
+        }
+        void* property = deltaName < 0 ? nullptr : FindChildProperty(function, deltaName);
+        const bool valid = property != nullptr &&
+                           ReadField<int>(property, kPropertyOffsetOffset) == 0 &&
+                           IsObjectName(ReadField<void*>(property, kUObjectClassOffset),
+                                        "FloatProperty", L"FloatProperty", &floatPropertyName);
+        state = valid ? 1 : -1;
+        InterlockedExchange(&target.deltaParameterState, state);
+        if (valid) {
+            Log(L"Smooth UI: %S.%S keeps real elapsed time across its 30 Hz steps.",
+                target.outerName, target.functionName);
+        }
+    }
+    return state == 1;
+}
+
+void ApplyUiGateDelta(void* object, BYTE* stack) {
+    if (!g_smoothUiExperimental || object == nullptr || g_scriptTickLimiterInstalled == 0) {
+        return;
+    }
+    void* function = *reinterpret_cast<void**>(stack + kFFrameNodeOffset);
+    const int targetIndex = FindUiFrameGateTargetForFunction(function);
+    if (targetIndex < 0 || !UiGateHasDeltaParameter(targetIndex, function)) {
+        return;
+    }
+    auto* locals = *reinterpret_cast<BYTE**>(stack + kFFrameLocalsOffset);
+    if (locals == nullptr) {
+        return;
+    }
+    float* deltaParameter = reinterpret_cast<float*>(locals);
+    const float incomingDelta = *deltaParameter;
+    if (!std::isfinite(incomingDelta) || incomingDelta < 0.0f || incomingDelta > 1.0f) {
+        return;
+    }
+    UiFrameGateState* state = FindOrCreateUiFrameGateState(object, targetIndex);
+    if (state == nullptr) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (state->lastCallMs != 0 && now - state->lastCallMs > 250) {
+        // Inactive (menu closed, level change): do not hand stale time to the next call.
+        state->accumulatedDelta = 0.0;
+    }
+    state->lastCallMs = now;
+    state->accumulatedDelta += static_cast<double>(incomingDelta);
+
+    // A suppressed call already had its code pointer moved to the return.
+    void* returnCode = UiGateReturnCode(targetIndex);
+    if (returnCode != nullptr &&
+        *reinterpret_cast<void**>(stack + kFFrameCodeOffset) == returnCode) {
+        return;
+    }
+    double accumulated = state->accumulatedDelta;
+    if (accumulated > static_cast<double>(g_maxDeltaSeconds)) {
+        accumulated = static_cast<double>(g_maxDeltaSeconds);
+    }
+    *deltaParameter = static_cast<float>(accumulated);
+    state->accumulatedDelta = 0.0;
+}
+
+// Mash QTE fill gauge. KidQTEManager.JudgeQTEInput_ButtonA_Repeatedly(No,
+// fDeltaTime) updates the on-screen fill with
+//   g = fNeedsInputCountPerSec * fDeltaTime
+//   mCurrentRate = Clamp(mCurrentRate + (bInput ? g : -g * mfRapidDecrease), 0, 1)
+// A press is worth one frame of fill while the drain is per second, so at high
+// frame rates the gauge reads far lower for the same mashing. fDeltaTime and
+// mfRapidDecrease are read only in that statement, so for each call the mod sets
+//   fDeltaTime'      = T + d * (T - dt)     (T = 1/30 s, d = original decay)
+//   mfRapidDecrease' = d * dt / fDeltaTime'
+// A frame without a press then drains n*d*dt (retail per second), and a press
+// adds n*T plus the drain retail skips for the rest of its frame: one press is
+// worth exactly what it was at 30 FPS. mfRapidDecrease is restored after the call.
+// Success is a press count and is unaffected.
+struct MashGaugeBinding {
+    PVOID volatile function;
+    ptrdiff_t deltaOffset;     // fDeltaTime in Locals
+    ptrdiff_t decreaseOffset;  // KidQTEManager.mfRapidDecrease
+    volatile LONG resolved;    // 1 = offsets valid, -1 = failed, 0 = pending
+};
+MashGaugeBinding g_mashGauge = {};
+void* FindClassProperty(void* object, int nameIndex);
+volatile LONG g_mashGaugeFunctionNameIndex = -1;
+volatile LONG g_mashGaugeOuterNameIndex = -1;
+volatile LONG g_mashFloatPropertyNameIndex = -1;
+
+void TryDiscoverMashGauge(void* function) {
+    if (!g_qteMashGaugeFix || function == nullptr || g_mashGauge.function != nullptr ||
+        !IsObjectName(function, "JudgeQTEInput_ButtonA_Repeatedly",
+                      L"JudgeQTEInput_ButtonA_Repeatedly", &g_mashGaugeFunctionNameIndex) ||
+        !IsFunctionOuterName(function, "KidQTEManager", L"KidQTEManager",
+                             &g_mashGaugeOuterNameIndex)) {
+        return;
+    }
+    InterlockedExchangePointer(&g_mashGauge.function, function);
+    MarkInteresting(function);
+}
+
+bool ResolveMashGauge(void* object, void* function) {
+    if (g_mashGauge.resolved != 0) {
+        return g_mashGauge.resolved == 1;
+    }
+    auto isFloat = [](void* property) {
+        return property != nullptr &&
+               IsObjectName(ReadField<void*>(property, kUObjectClassOffset), "FloatProperty",
+                            L"FloatProperty", &g_mashFloatPropertyNameIndex);
+    };
+    void* delta = FindChildProperty(function, FindNameIndex("fDeltaTime"));
+    void* decrease = FindClassProperty(object, FindNameIndex("mfRapidDecrease"));
+    const int deltaOffset = ReadField<int>(delta, kPropertyOffsetOffset);
+    const int decreaseOffset = ReadField<int>(decrease, kPropertyOffsetOffset);
+    const bool valid = isFloat(delta) && isFloat(decrease) &&
+                       deltaOffset >= 0 && deltaOffset < 0x100 &&
+                       decreaseOffset >= 0x3C && decreaseOffset < 0x4000;
+    g_mashGauge.deltaOffset = deltaOffset;
+    g_mashGauge.decreaseOffset = decreaseOffset;
+    InterlockedExchange(&g_mashGauge.resolved, valid ? 1 : -1);
+    Log(valid ? L"Mash QTE gauge fix active: a press is worth the same fill at any frame rate."
+              : L"Mash QTE gauge fix: layout did not validate; the gauge is left unchanged.");
+    return valid;
+}
+
+// Returns the address to restore (with the original value in *original), or null.
+float* BeginMashGauge(void* object, BYTE* stack, float* original) {
+    void* function = *reinterpret_cast<void**>(stack + kFFrameNodeOffset);
+    if (!g_qteMashGaugeFix || object == nullptr || function == nullptr ||
+        function != g_mashGauge.function || !ResolveMashGauge(object, function)) {
+        return nullptr;
+    }
+    auto* locals = *reinterpret_cast<BYTE**>(stack + kFFrameLocalsOffset);
+    if (locals == nullptr) {
+        return nullptr;
+    }
+    float* delta = reinterpret_cast<float*>(locals + g_mashGauge.deltaOffset);
+    float* decrease = reinterpret_cast<float*>(static_cast<BYTE*>(object) + g_mashGauge.decreaseOffset);
+    constexpr float kRetailFrame = 1.0f / 30.0f;
+    const float dt = *delta;
+    const float decay = *decrease;
+    if (!(dt > 0.0f && dt < kRetailFrame) || !(decay >= 0.0f && decay < 100.0f)) {
+        return nullptr;  // 30 FPS or slower, a pause, or an unexpected value: retail maths.
+    }
+    const float pressStep = kRetailFrame + decay * (kRetailFrame - dt);
+    *original = decay;
+    *delta = pressStep;
+    *decrease = decay * dt / pressStep;
+    return decrease;
+}
+
 using ProcessInternalFunction = void(__thiscall*)(void* object, void* stack, void* result);
 ProcessInternalFunction g_originalProcessInternal = nullptr;
 
@@ -3820,8 +4002,14 @@ void __fastcall ScriptProcessInternal(void* object, void*, BYTE* stack, void* re
             ApplyLiveScriptConstants(function, stack);
         }
         ProcessFixedStepFunction(object, stack);
+        ApplyUiGateDelta(object, stack);
     }
+    float originalDecrease = 0.0f;
+    float* restoreDecrease = BeginMashGauge(object, stack, &originalDecrease);
     g_originalProcessInternal(object, stack, result);
+    if (restoreDecrease != nullptr) {
+        *restoreDecrease = originalDecrease;
+    }
 }
 
 void TryActivateSebastianStunFallFix(void* object, void* function) {
@@ -4506,6 +4694,7 @@ void* __fastcall ScriptAwareFrameConstructor(
         TryDiscoverRootMotionFunction(function);
         TryDiscoverCounterGate(function);
         TryDiscoverSebastianStunTick(function);
+        TryDiscoverMashGauge(function);
     }
     if (!IsInteresting(function)) {
         return g_originalFrameConstructor(
@@ -4678,6 +4867,7 @@ void Initialize() {
 
     auto* base = reinterpret_cast<BYTE*>(executable);
     // Before WinMain reads the command line (see Resolution.cpp).
+    ApplyStartMap(g_startMap);
     ApplyStartupResolution(g_resolutionMode, g_resolutionWidth, g_resolutionHeight);
     if (g_timingProbe) {
         g_timingProbeInstalled = TimingProbeInstall(base);

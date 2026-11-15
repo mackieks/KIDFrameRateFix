@@ -64,7 +64,89 @@ bool HasArgument(const wchar_t* commandLine, const wchar_t* name) {
     return false;
 }
 
+// Replaces the process command line (KernelBase's cached wide and ANSI copies
+// and the PEB) with `replacement`. The new buffers live for the process lifetime.
+bool ReplaceCommandLine(const wchar_t* replacement) {
+    HMODULE kernelBase = GetModuleHandleW(L"kernelbase.dll");
+    auto* wideCached = kernelBase ? FindCountedString<UNICODE_STRING>(kernelBase, GetCommandLineW()) : nullptr;
+    auto* ansiCached = kernelBase ? FindCountedString<CountedAnsiString>(kernelBase, GetCommandLineA()) : nullptr;
+    if (wideCached == nullptr || ansiCached == nullptr) {
+        return false;
+    }
+    const size_t wideLength = wcslen(replacement);
+    if (wideLength * sizeof(wchar_t) > 0xFFF0) {
+        return false;
+    }
+    auto* wide = static_cast<wchar_t*>(
+        HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (wideLength + 1) * sizeof(wchar_t)));
+    auto* ansi = static_cast<char*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, wideLength * 3 + 1));
+    if (wide == nullptr || ansi == nullptr) {
+        return false;
+    }
+    wcscpy_s(wide, wideLength + 1, replacement);
+    const int ansiBytes = WideCharToMultiByte(CP_ACP, 0, wide, -1, ansi,
+                                              static_cast<int>(wideLength * 3 + 1), nullptr, nullptr);
+    if (ansiBytes <= 0) {
+        return false;
+    }
+
+    wideCached->Buffer = wide;
+    wideCached->Length = static_cast<USHORT>(wideLength * sizeof(wchar_t));
+    wideCached->MaximumLength = static_cast<USHORT>((wideLength + 1) * sizeof(wchar_t));
+    ansiCached->Buffer = ansi;
+    ansiCached->Length = static_cast<USHORT>(ansiBytes - 1);
+    ansiCached->MaximumLength = static_cast<USHORT>(ansiBytes);
+
+    // Keep the PEB copy consistent for anything that reads it directly.
+    PEB* peb = reinterpret_cast<PEB*>(__readfsdword(0x30));
+    if (peb != nullptr && peb->ProcessParameters != nullptr) {
+        peb->ProcessParameters->CommandLine.Buffer = wide;
+        peb->ProcessParameters->CommandLine.Length = wideCached->Length;
+        peb->ProcessParameters->CommandLine.MaximumLength = wideCached->MaximumLength;
+    }
+    return true;
+}
+
 }  // namespace
+
+// [Diagnostics] StartMap: a testing aid. UE3 treats the first command-line
+// token after the executable as the map URL, but Steam can put its own
+// switches first, so the map is inserted directly after the executable path.
+void ApplyStartMap(const wchar_t* map) {
+    if (map == nullptr || map[0] == L'\0') {
+        return;
+    }
+    const wchar_t* current = GetCommandLineW();
+    if (current == nullptr) {
+        return;
+    }
+    // End of the executable token: a quoted path or the first space.
+    const wchar_t* rest = current;
+    if (*rest == L'"') {
+        rest = wcschr(rest + 1, L'"');
+        rest = rest == nullptr ? current + wcslen(current) : rest + 1;
+    } else {
+        while (*rest != L'\0' && *rest != L' ') {
+            ++rest;
+        }
+    }
+    const size_t prefixLength = static_cast<size_t>(rest - current);
+    const size_t length = wcslen(current) + wcslen(map) + 2;
+    auto* line = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (length + 1) * sizeof(wchar_t)));
+    if (line == nullptr) {
+        return;
+    }
+    wcsncpy_s(line, length + 1, current, prefixLength);
+    wcscat_s(line, length + 1, L" ");
+    wcscat_s(line, length + 1, map);
+    wcscat_s(line, length + 1, rest);
+    if (ReplaceCommandLine(line)) {
+        KidLog(L"StartMap: loading %s directly (testing aid).", map);
+    } else {
+        KidLog(L"StartMap: command-line storage not found; the game starts normally.");
+    }
+    HeapFree(GetProcessHeap(), 0, line);
+}
 
 // mode: 0 = leave the game's resolution alone, 1 = desktop resolution,
 // 2 = the configured width/height.
@@ -96,46 +178,20 @@ void ApplyStartupResolution(int mode, int width, int height) {
         return;
     }
 
-    HMODULE kernelBase = GetModuleHandleW(L"kernelbase.dll");
-    const char* currentAnsi = GetCommandLineA();
-    auto* wideCached = kernelBase ? FindCountedString<UNICODE_STRING>(kernelBase, current) : nullptr;
-    auto* ansiCached = kernelBase ? FindCountedString<CountedAnsiString>(kernelBase, currentAnsi) : nullptr;
-    if (wideCached == nullptr || ansiCached == nullptr) {
-        KidLog(L"Resolution: command-line storage not found; using the game's setting.");
-        return;
-    }
-
-    // Allocated once for the lifetime of the process, as the originals are.
     wchar_t suffix[64] = {};
     _snwprintf_s(suffix, sizeof(suffix) / sizeof(suffix[0]), _TRUNCATE, L" ResX=%d ResY=%d", width, height);
-    const size_t wideLength = wcslen(current) + wcslen(suffix);
-    auto* wide = static_cast<wchar_t*>(
-        HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (wideLength + 1) * sizeof(wchar_t)));
-    auto* ansi = static_cast<char*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, wideLength * 3 + 1));
-    if (wide == nullptr || ansi == nullptr || wideLength * sizeof(wchar_t) > 0xFFF0) {
+    const size_t length = wcslen(current) + wcslen(suffix);
+    auto* line = static_cast<wchar_t*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (length + 1) * sizeof(wchar_t)));
+    if (line == nullptr) {
         return;
     }
-    wcscpy_s(wide, wideLength + 1, current);
-    wcscat_s(wide, wideLength + 1, suffix);
-    const int ansiBytes = WideCharToMultiByte(CP_ACP, 0, wide, -1, ansi,
-                                              static_cast<int>(wideLength * 3 + 1), nullptr, nullptr);
-    if (ansiBytes <= 0) {
+    wcscpy_s(line, length + 1, current);
+    wcscat_s(line, length + 1, suffix);
+    const bool replaced = ReplaceCommandLine(line);
+    HeapFree(GetProcessHeap(), 0, line);
+    if (!replaced) {
+        KidLog(L"Resolution: command-line storage not found; using the game's setting.");
         return;
-    }
-
-    wideCached->Buffer = wide;
-    wideCached->Length = static_cast<USHORT>(wideLength * sizeof(wchar_t));
-    wideCached->MaximumLength = static_cast<USHORT>((wideLength + 1) * sizeof(wchar_t));
-    ansiCached->Buffer = ansi;
-    ansiCached->Length = static_cast<USHORT>(ansiBytes - 1);
-    ansiCached->MaximumLength = static_cast<USHORT>(ansiBytes);
-
-    // Keep the PEB copy consistent for anything that reads it directly.
-    PEB* peb = reinterpret_cast<PEB*>(__readfsdword(0x30));
-    if (peb != nullptr && peb->ProcessParameters != nullptr) {
-        peb->ProcessParameters->CommandLine.Buffer = wide;
-        peb->ProcessParameters->CommandLine.Length = wideCached->Length;
-        peb->ProcessParameters->CommandLine.MaximumLength = wideCached->MaximumLength;
     }
     KidLog(L"Resolution: starting at %dx%d (%s).", width, height,
            mode == 1 ? L"desktop resolution" : L"configured");

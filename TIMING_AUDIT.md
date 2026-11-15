@@ -66,6 +66,7 @@ An elapsed-time accumulator in the HUD tick increments a shared generation count
 | `FGFxEngine::Tick` movie advance | Every game-timed Scaleform movie advances by `1/30` s per rendered frame | `Movie::Advance` and `PostAdvance` receive the real frame time |
 | `UKidGFxMgr::Tick` | Frame-counted HUD scripts run once per rendered frame | Smooth UI (default): runs every frame with real `DeltaTime`; see *Smooth UI*. Bridge mode: runs at 30 Hz from an accumulator. |
 | `KidNewMessage.Tick` | Six-frame input and display guards run per rendered frame, so one press dismisses several unlock notices | One update per generation. Catch-up generations collapse to one update, so a cached input edge can't replay. |
+| `KidQTEManager.JudgeQTEInput_ButtonA_Repeatedly` | Mash fill gauge: `g = n·dt`, then `+g` on a press frame and `−g·mfRapidDecrease` on every other frame. A press is worth one frame of fill while the drain is per second, so above 30 FPS the gauge reads far lower, and at 90 FPS it stays empty at normal mashing speeds. Success is a press count and is unaffected. | `QTEMashGaugeFix`: per call, `fDeltaTime` becomes `T + d·(T − dt)` and `mfRapidDecrease` becomes `d·dt / that` (T = 1/30 s, d = original decay; both are read only in the gauge statement), and the decay is restored after the call. A frame without a press drains `n·d·dt`, and a press adds exactly what it did at 30 FPS. Averaged over a second, the simulated gauge stays within about 0.015 of 30 FPS at 90 and 240 FPS. No change at 30 FPS or below. |
 
 ### Gameplay
 
@@ -105,7 +106,9 @@ The UnrealScript HUD layer runs every frame in smooth-UI mode. Each part is hand
 | `KidGFxMgr.EarthControlTick` | Title globe ease `alpha += (1-alpha)*0.1` per call | Runs every frame; `0.1` becomes `1-0.9^(dt*30)`, which is exact |
 | `KidGFx_TitleMenuContent.Tick` | Logo `Alpha ±= 1/6` and `Reverse ±= 1/30` per call; six state-machine counters | Runs every frame. The four ramp numerators are scaled by `dt*30`, and the six counters keep the 30 Hz clock. |
 | `KidGFxMgr.PauseEventTick`, `KidGFx_MovieStatus`, `MovieResultContent`, `ClearStats`, `Leaderboard`, `ABVision` `.Tick` | One-shot or staged frame delays only | 30 Hz return-code gate |
-| `KidGFx_MondoGauge`, `MondoStatus`, `WeaponChange`, `BurstVision`, `ButtonGuide` `.Tick` | Update throttles, shake duration and per-frame shake offsets, visibility delays. Gauge values are pushed into ActionScript, which animates at the SWF frame rate. | 30 Hz return-code gate; running these every frame would change only the shake jitter frequency |
+| `KidGFx_MondoGauge`, `MondoStatus`, `WeaponChange`, `BurstVision`, `ButtonGuide` `.Tick` | Update throttles, shake duration and per-frame shake offsets, visibility delays. Gauge values are pushed into ActionScript, which animates at the SWF frame rate. Several also advance timers by `DeltaTime`: the challenge-mission countdown (`MondoGauge.m_fTimerHudVal`), the QTE prompt hide delay (`ButtonGuide.m_fQTEHideDelay`), the health, blood and level bar ticks, and `BurstVision.UpdateSleepWait`. | 30 Hz return-code gate; running these every frame would change only the shake jitter frequency |
+
+Gated functions still receive every rendered frame's call, each carrying that frame's `DeltaTime`. Passed through unchanged, an executed 30 Hz body would advance its timers by one frame's time per step, so the challenge countdown would run at 30/FPS of real speed. In the `UObject::ProcessInternal` hook, where arguments are valid, every call to a gated function whose first parameter is `float DeltaTime` (checked through reflection) adds its delta to a per-object total. The executed call receives that total, capped at `MaxDeltaMilliseconds` and discarded after 250 ms of inactivity. Suppressed calls are recognised by the return code the gate wrote into the frame.
 
 ## Framerate limits
 
@@ -115,7 +118,8 @@ A frame rate that stops at the same value whatever is on screen comes from outsi
 
 ## Verified as time-based
 
-- `KidQTEManager.Tick` and `TickQTEData`: durations and attachment interpolation use `DeltaTime`.
+- `KidQTEManager.Tick` and `TickQTEData`: durations and attachment interpolation use `DeltaTime`. `JudgeQTEInput` advances each QTE's clock by `GetGlobalDeltaTime()`, and mash QTEs (including David's sword lock) succeed on a press count.
+- Player input windows: the perfect-dodge window (`TickJustDodge`), dodge limit (`PlayerDodgeState.TickLimitOver`), the Adrenaline Burst counter routines, and the combo, burst and custom-input timers in `KidComboManager` all advance by `DeltaTime` or real delta. Their integer counters are routine step indices, not frame counts.
 - `KidPawn.RunAttackFrame`: attack windows follow animation time.
 - Projectile and actor movement, lifespans and ordinary timers use the tick delta.
 - `miGameTotalTickCount` is a same-frame identity used for collision and QTE deduplication, not elapsed time. Converting it to seconds would break deduplication.
